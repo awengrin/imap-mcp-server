@@ -421,7 +421,9 @@ function createServer() {
         return { content: [{ type: "text", text: `[${account}] ${folder} — UID ${uid}:\n\n${formatEmail({ uid, envelope, flags, bodyText, attachments }, true)}` }] };
       } finally { lock.release(); }
     } catch (err) {
-      return { content: [{ type: "text", text: `Chyba: ${err.message}` }], isError: true };
+      const detail = err.responseStatus ? ` [${err.responseStatus}] ${err.responseText || ''}` : '';
+      console.error(`[imap_get_email] ${err.message}${detail}`, err.stack);
+      return { content: [{ type: "text", text: `Chyba: ${err.message}${detail}` }], isError: true };
     } finally {
       await client.logout().catch(() => {});
     }
@@ -444,8 +446,10 @@ function createServer() {
           return { content: [{ type: "text", text: `[${account}] UID ${uid} označený ako ${label}.` }] };
         } finally { lock.release(); }
       } catch (err) {
-        return { content: [{ type: "text", text: `Chyba: ${err.message}` }], isError: true };
-      } finally { await client.logout().catch(() => {}); }
+      const detail = err.responseStatus ? ` [${err.responseStatus}] ${err.responseText || ''}` : '';
+      console.error(`[imap_get_email] ${err.message}${detail}`, err.stack);
+      return { content: [{ type: "text", text: `Chyba: ${err.message}${detail}` }], isError: true };
+    } finally { await client.logout().catch(() => {}); }
     });
   }
 
