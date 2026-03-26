@@ -348,15 +348,20 @@ function createServer() {
         if (since) query.since = new Date(since);
         if (before) query.before = new Date(before);
         if (seen === true) query.seen = true;
-        if (seen === false) query.seen = false;
+        if (seen === false) query.unseen = true;
         if (flagged === true) query.flagged = true;
+
+        // Ak nie sú žiadne kritériá, hľadaj všetko
+        if (Object.keys(query).length === 0) query.all = true;
 
         const uids = await client.search(query, { uid: true });
         if (!uids?.length) return { content: [{ type: "text", text: `[${account}] ${folder}: Nič nenájdené.` }] };
 
         const selected = uids.slice(-Math.min(limit, 50));
+        // ImapFlow fetch vyžaduje UID ako string sequence set
+        const uidRange = selected.join(",");
         const messages = [];
-        for await (const msg of client.fetch(selected, { envelope: true, flags: true, bodyStructure: true, uid: true })) {
+        for await (const msg of client.fetch(uidRange, { envelope: true, flags: true, bodyStructure: true, uid: true })) {
           messages.push(msg);
         }
         messages.sort((a, b) => new Date(b.envelope.date) - new Date(a.envelope.date));
@@ -382,7 +387,8 @@ function createServer() {
       try {
         let envelope, flags;
         const attachments = [];
-        for await (const msg of client.fetch(uid, { envelope: true, flags: true, bodyStructure: true, uid: true })) {
+        const uidStr = String(uid);
+        for await (const msg of client.fetch(uidStr, { envelope: true, flags: true, bodyStructure: true, uid: true })) {
           envelope = msg.envelope;
           flags = msg.flags;
           // Collect attachment info
@@ -395,19 +401,21 @@ function createServer() {
           })(msg.bodyStructure);
         }
 
+        if (!envelope) throw new Error(`UID ${uid} nenájdený v ${folder}.`);
+
         let bodyText = "";
         try {
-          const { content } = await client.download(uid, "1", { uid: true });
+          const { content } = await client.download(uidStr, "1", { uid: true });
           const chunks = [];
           for await (const chunk of content) chunks.push(chunk);
           bodyText = Buffer.concat(chunks).toString("utf-8");
         } catch {
           try {
-            const { content } = await client.download(uid, "1.1", { uid: true });
+            const { content } = await client.download(uidStr, "1.1", { uid: true });
             const chunks = [];
             for await (const chunk of content) chunks.push(chunk);
             bodyText = Buffer.concat(chunks).toString("utf-8");
-          } catch { /* no body */ }
+          } catch { bodyText = "(nepodarilo sa načítať telo správy)"; }
         }
 
         return { content: [{ type: "text", text: `[${account}] ${folder} — UID ${uid}:\n\n${formatEmail({ uid, envelope, flags, bodyText, attachments }, true)}` }] };
@@ -581,7 +589,8 @@ function createServer() {
       const lock = await client.getMailboxLock(folder);
       let envelope;
       try {
-        for await (const msg of client.fetch(uid, { envelope: true, uid: true })) { envelope = msg.envelope; }
+        const uidStr = String(uid);
+        for await (const msg of client.fetch(uidStr, { envelope: true, uid: true })) { envelope = msg.envelope; }
       } finally { lock.release(); }
 
       if (!envelope) throw new Error(`UID ${uid} nenájdený.`);
@@ -630,9 +639,10 @@ function createServer() {
       let envelope;
       let bodyText = "";
       try {
-        for await (const msg of client.fetch(uid, { envelope: true, uid: true })) { envelope = msg.envelope; }
+        const uidStr = String(uid);
+        for await (const msg of client.fetch(uidStr, { envelope: true, uid: true })) { envelope = msg.envelope; }
         try {
-          const { content } = await client.download(uid, "1", { uid: true });
+          const { content } = await client.download(uidStr, "1", { uid: true });
           const chunks = [];
           for await (const chunk of content) chunks.push(chunk);
           bodyText = Buffer.concat(chunks).toString("utf-8");
@@ -678,7 +688,7 @@ function createServer() {
     try {
       const lock = await client.getMailboxLock(folder);
       try {
-        const { content, meta } = await client.download(uid, part, { uid: true });
+        const { content, meta } = await client.download(String(uid), part, { uid: true });
         const chunks = [];
         for await (const chunk of content) chunks.push(chunk);
         const buffer = Buffer.concat(chunks);
