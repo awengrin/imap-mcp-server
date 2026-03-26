@@ -760,11 +760,8 @@ if (TRANSPORT === "stdio") {
   const app = express();
   // Fix Accept header — SDK vyžaduje oba MIME typy
   app.use((req, res, next) => {
-    if (req.path === "/mcp" && req.method === "POST") {
+    if (req.method === "POST" || req.method === "DELETE" || req.method === "GET") {
       req.headers["accept"] = "application/json, text/event-stream";
-    }
-    if (req.path === "/mcp" && req.method === "DELETE") {
-      req.headers["accept"] = "application/json";
     }
     next();
   });
