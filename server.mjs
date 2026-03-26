@@ -223,7 +223,7 @@ function formatEmail(msg, includeBody = false) {
   }
 
   if (msg.attachments?.length) {
-    lines.push(`Prílohy: ${msg.attachments.map((a) => `${a.filename || "bez_nazvu"} (${a.size ? (a.size / 1024).toFixed(1) + " KB" : "?"})`).join(", ")}`);
+    lines.push(`Prílohy: ${msg.attachments.map((a) => `${a.filename || "bez_nazvu"} (${a.size ? (a.size / 1024).toFixed(1) + " KB" : "?"}, part: ${a.part || "?"})`).join(", ")}`);
   }
 
   return lines.join("\n");
@@ -688,7 +688,7 @@ function createServer() {
   });
 
   // ── DOWNLOAD ATTACHMENT ──
-  server.tool("imap_download_attachment", "Stiahne prílohu z emailu (vráti base64 alebo text).", {
+  server.tool("imap_download_attachment", "Stiahne prílohu z emailu. Pre textové prílohy (<100KB) vráti text priamo. Pre binárne/väčšie prílohy vráti download URL (platí 5 minút).", {
     account: accountParam, folder: z.string().default("INBOX"),
     uid: z.number(), part: z.string().describe("Part číslo prílohy"),
   }, async ({ account, folder, uid, part }) => {
@@ -700,11 +700,26 @@ function createServer() {
         const chunks = [];
         for await (const chunk of content) chunks.push(chunk);
         const buffer = Buffer.concat(chunks);
+        const filename = meta?.filename || `attachment_${uid}_${part}`;
+        const contentType = meta?.contentType || "application/octet-stream";
+        const sizeKB = (buffer.length / 1024).toFixed(1);
 
-        if (meta?.contentType?.startsWith("text/") && buffer.length < 100000) {
-          return { content: [{ type: "text", text: `[${account}] Príloha ${meta.filename || part} (${(buffer.length / 1024).toFixed(1)} KB):\n\n${buffer.toString("utf-8")}` }] };
+        // Textové prílohy menšie ako 100KB vrátime priamo
+        if (contentType.startsWith("text/") && buffer.length < 100000) {
+          return { content: [{ type: "text", text: `[${account}] Príloha ${filename} (${sizeKB} KB):\n\n${buffer.toString("utf-8")}` }] };
         }
-        return { content: [{ type: "text", text: `[${account}] Príloha ${meta?.filename || part} (${(buffer.length / 1024).toFixed(1)} KB) — base64:\n${buffer.toString("base64")}` }] };
+
+        // Binárne/väčšie prílohy — uložíme do cache a vrátime download URL
+        const token = randomUUID();
+        attachmentCache.set(token, { buffer, filename, contentType, created: Date.now() });
+
+        // Zistíme base URL servera
+        const baseUrl = process.env.RAILWAY_PUBLIC_DOMAIN
+          ? `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`
+          : `http://localhost:${PORT}`;
+        const downloadUrl = `${baseUrl}/attachment/${token}`;
+
+        return { content: [{ type: "text", text: `[${account}] Príloha: ${filename} (${sizeKB} KB, ${contentType})\nDownload URL: ${downloadUrl}\nURL platí 5 minút. Po stiahnutí sa automaticky zmaže.` }] };
       } finally { lock.release(); }
     } catch (err) {
       return { content: [{ type: "text", text: `Chyba: ${err.message}` }], isError: true };
@@ -756,6 +771,26 @@ function createServer() {
 // TRANSPORT — Streamable HTTP (2025) + SSE fallback (2024)
 // ─────────────────────────────────────────────
 
+// ─────────────────────────────────────────────
+// ATTACHMENT DOWNLOAD CACHE
+// ─────────────────────────────────────────────
+// In-memory cache pre stiahnuté prílohy. Token → { buffer, filename, contentType, created }
+// Prílohy sa automaticky mažú po 5 minútach.
+const attachmentCache = new Map();
+const ATTACHMENT_TTL_MS = 5 * 60 * 1000; // 5 minút
+
+function cleanExpiredAttachments() {
+  const now = Date.now();
+  for (const [token, entry] of attachmentCache) {
+    if (now - entry.created > ATTACHMENT_TTL_MS) {
+      attachmentCache.delete(token);
+    }
+  }
+}
+
+// Čistenie každú minútu
+setInterval(cleanExpiredAttachments, 60 * 1000);
+
 const TRANSPORT = process.env.TRANSPORT || "http";
 const PORT = parseInt(process.env.PORT || "3000", 10);
 
@@ -771,6 +806,22 @@ if (TRANSPORT === "stdio") {
 
   app.get("/health", (req, res) => {
     res.json({ status: "ok", accounts: Object.keys(ACCOUNTS).length, sessions: Object.keys(transports).length, uptime: process.uptime() });
+  });
+
+  // ── Attachment download endpoint ──
+  app.get("/attachment/:token", (req, res) => {
+    const entry = attachmentCache.get(req.params.token);
+    if (!entry) {
+      return res.status(404).json({ error: "Príloha nenájdená alebo expirovala (TTL 5 minút)." });
+    }
+    const contentType = entry.contentType || "application/octet-stream";
+    const filename = entry.filename || "attachment";
+    res.setHeader("Content-Type", contentType);
+    res.setHeader("Content-Disposition", `attachment; filename="${encodeURIComponent(filename)}"`);
+    res.setHeader("Content-Length", entry.buffer.length);
+    res.send(entry.buffer);
+    // Po stiahnutí zmažeme z cache
+    attachmentCache.delete(req.params.token);
   });
 
   // ── Streamable HTTP (protocol 2025-11-25) — /mcp ──
