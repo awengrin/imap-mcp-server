@@ -73,6 +73,17 @@ const ACCOUNTS = loadAccounts();
 console.error(`Načítaných ${Object.keys(ACCOUNTS).length} účtov: ${Object.keys(ACCOUNTS).join(", ") || "(žiadne)"}`);
 
 // ─────────────────────────────────────────────
+// FIX: Accept header patch pre claude.ai kompatibilitu
+// SDK vyžaduje Accept: application/json, text/event-stream
+// ale claude.ai ho neposiela — patchujeme prototype
+// ─────────────────────────────────────────────
+const origHandleRequest = StreamableHTTPServerTransport.prototype.handleRequest;
+StreamableHTTPServerTransport.prototype.handleRequest = function(req, res, body) {
+  req.headers["accept"] = "application/json, text/event-stream";
+  return origHandleRequest.call(this, req, res, body);
+};
+
+// ─────────────────────────────────────────────
 // IMAP + SMTP HELPERS
 // ─────────────────────────────────────────────
 
@@ -351,14 +362,12 @@ function createServer() {
         if (seen === false) query.unseen = true;
         if (flagged === true) query.flagged = true;
 
-        // Ak nie sú žiadne kritériá, hľadaj všetko
         if (Object.keys(query).length === 0) query.all = true;
 
         const uids = await client.search(query, { uid: true });
         if (!uids?.length) return { content: [{ type: "text", text: `[${account}] ${folder}: Nič nenájdené.` }] };
 
         const selected = uids.slice(-Math.min(limit, 50));
-        // ImapFlow fetch vyžaduje UID ako string sequence set
         const uidRange = selected.join(",");
         const messages = [];
         for await (const msg of client.fetch(uidRange, { envelope: true, flags: true, bodyStructure: true, uid: true })) {
@@ -369,7 +378,9 @@ function createServer() {
         return { content: [{ type: "text", text: `[${account}] ${folder} — nájdených ${uids.length}, zobrazených ${messages.length}:\n\n${lines.join("\n\n")}` }] };
       } finally { lock.release(); }
     } catch (err) {
-      return { content: [{ type: "text", text: `Chyba: ${err.message}` }], isError: true };
+      const detail = err.responseStatus ? ` [${err.responseStatus}] ${err.responseText || ''}` : '';
+      console.error(`[imap_search_emails] ${err.message}${detail}`, err.stack);
+      return { content: [{ type: "text", text: `Chyba: ${err.message}${detail}` }], isError: true };
     } finally {
       await client.logout().catch(() => {});
     }
@@ -446,10 +457,8 @@ function createServer() {
           return { content: [{ type: "text", text: `[${account}] UID ${uid} označený ako ${label}.` }] };
         } finally { lock.release(); }
       } catch (err) {
-      const detail = err.responseStatus ? ` [${err.responseStatus}] ${err.responseText || ''}` : '';
-      console.error(`[imap_get_email] ${err.message}${detail}`, err.stack);
-      return { content: [{ type: "text", text: `Chyba: ${err.message}${detail}` }], isError: true };
-    } finally { await client.logout().catch(() => {}); }
+        return { content: [{ type: "text", text: `Chyba: ${err.message}` }], isError: true };
+      } finally { await client.logout().catch(() => {}); }
     });
   }
 
@@ -762,13 +771,6 @@ if (TRANSPORT === "stdio") {
   console.error("IMAP MCP server — stdio režim.");
 } else {
   const app = express();
-  // Patch StreamableHTTPServerTransport.handleRequest aby preskočil Accept validáciu
-  const OrigTransport = StreamableHTTPServerTransport;
-  const origProto = OrigTransport.prototype.handleRequest;
-  OrigTransport.prototype.handleRequest = function(req, res, body) {
-    req.headers["accept"] = "application/json, text/event-stream";
-    return origProto.call(this, req, res, body);
-  };
   app.use(express.json());
   const transports = {};
 
