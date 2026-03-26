@@ -1,6 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { randomUUID } from "node:crypto";
 import express from "express";
 import { z } from "zod";
 import { ImapFlow } from "imapflow";
@@ -732,7 +735,7 @@ function createServer() {
 }
 
 // ─────────────────────────────────────────────
-// TRANSPORT
+// TRANSPORT — Streamable HTTP (2025) + SSE fallback (2024)
 // ─────────────────────────────────────────────
 
 const TRANSPORT = process.env.TRANSPORT || "http";
@@ -746,28 +749,99 @@ if (TRANSPORT === "stdio") {
 } else {
   const app = express();
   app.use(express.json());
-  const sessions = {};
+  const transports = {};
 
   app.get("/health", (req, res) => {
-    res.json({ status: "ok", accounts: Object.keys(ACCOUNTS).length, sessions: Object.keys(sessions).length, uptime: process.uptime() });
+    res.json({ status: "ok", accounts: Object.keys(ACCOUNTS).length, sessions: Object.keys(transports).length, uptime: process.uptime() });
   });
 
-  app.get("/mcp", async (req, res) => {
+  // ── Streamable HTTP (protocol 2025-11-25) — /mcp ──
+  app.all("/mcp", async (req, res) => {
+    try {
+      const sessionId = req.headers["mcp-session-id"];
+      let transport;
+
+      if (sessionId && transports[sessionId]) {
+        const existing = transports[sessionId];
+        if (existing instanceof StreamableHTTPServerTransport) {
+          transport = existing;
+        } else {
+          res.status(400).json({ jsonrpc: "2.0", error: { code: -32000, message: "Session uses different transport" }, id: null });
+          return;
+        }
+      } else if (!sessionId && req.method === "POST" && isInitializeRequest(req.body)) {
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sid) => {
+            console.error(`Streamable HTTP session: ${sid}`);
+            transports[sid] = transport;
+          },
+        });
+        transport.onclose = () => {
+          const sid = transport.sessionId;
+          if (sid && transports[sid]) {
+            delete transports[sid];
+          }
+        };
+        const server = createServer();
+        await server.connect(transport);
+      } else if (!sessionId && req.method === "GET") {
+        // SSE fallback na /mcp pre staršie klienty
+        const srv = createServer();
+        const sseTransport = new SSEServerTransport("/mcp", res);
+        transports[sseTransport.sessionId] = sseTransport;
+        res.on("close", () => {
+          delete transports[sseTransport.sessionId];
+          srv.close().catch(() => {});
+        });
+        await srv.connect(sseTransport);
+        return;
+      } else if (sessionId && transports[sessionId] instanceof SSEServerTransport) {
+        // POST pre existujúcu SSE session
+        await transports[sessionId].handlePostMessage(req, res, req.body);
+        return;
+      } else {
+        res.status(400).json({ jsonrpc: "2.0", error: { code: -32000, message: "Bad Request: No valid session" }, id: null });
+        return;
+      }
+
+      await transport.handleRequest(req, res, req.body);
+    } catch (error) {
+      console.error("MCP request error:", error);
+      if (!res.headersSent) {
+        res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: "Internal server error" }, id: null });
+      }
+    }
+  });
+
+  // ── Deprecated SSE (protocol 2024-11-05) — /sse + /messages ──
+  app.get("/sse", async (req, res) => {
     const srv = createServer();
-    const transport = new SSEServerTransport("/mcp", res);
-    sessions[transport.sessionId] = { transport, server: srv };
-    res.on("close", () => { delete sessions[transport.sessionId]; srv.close().catch(() => {}); });
+    const transport = new SSEServerTransport("/messages", res);
+    transports[transport.sessionId] = transport;
+    res.on("close", () => { delete transports[transport.sessionId]; srv.close().catch(() => {}); });
     await srv.connect(transport);
   });
 
-  app.post("/mcp", async (req, res) => {
+  app.post("/messages", async (req, res) => {
     const sessionId = req.query.sessionId;
-    const session = sessions[sessionId];
-    if (!session) return res.status(404).json({ error: "Session not found" });
-    await session.transport.handlePostMessage(req, res);
+    const transport = transports[sessionId];
+    if (transport instanceof SSEServerTransport) {
+      await transport.handlePostMessage(req, res, req.body);
+    } else {
+      res.status(400).json({ error: "No SSE transport for this session" });
+    }
   });
 
   app.listen(PORT, () => {
-    console.error(`IMAP MCP server — port ${PORT}, účtov: ${Object.keys(ACCOUNTS).length}`);
+    console.error(`IMAP MCP server — port ${PORT}, účtov: ${Object.keys(ACCOUNTS).length}, transport: Streamable HTTP + SSE fallback`);
+  });
+
+  process.on("SIGINT", async () => {
+    for (const sid in transports) {
+      try { await transports[sid].close(); } catch {}
+      delete transports[sid];
+    }
+    process.exit(0);
   });
 }
