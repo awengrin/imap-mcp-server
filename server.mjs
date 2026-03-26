@@ -74,8 +74,6 @@ console.error(`Načítaných ${Object.keys(ACCOUNTS).length} účtov: ${Object.k
 
 // ─────────────────────────────────────────────
 // FIX: Accept header patch pre claude.ai kompatibilitu
-// SDK vyžaduje Accept: application/json, text/event-stream
-// ale claude.ai ho neposiela — patchujeme prototype
 // ─────────────────────────────────────────────
 const origHandleRequest = StreamableHTTPServerTransport.prototype.handleRequest;
 StreamableHTTPServerTransport.prototype.handleRequest = function(req, res, body) {
@@ -370,7 +368,7 @@ function createServer() {
         const selected = uids.slice(-Math.min(limit, 50));
         const uidRange = selected.join(",");
         const messages = [];
-        for await (const msg of client.fetch(uidRange, { envelope: true, flags: true, bodyStructure: true, uid: true })) {
+        for await (const msg of client.fetch(uidRange, { envelope: true, flags: true, bodyStructure: true }, { uid: true })) {
           messages.push(msg);
         }
         messages.sort((a, b) => new Date(b.envelope.date) - new Date(a.envelope.date));
@@ -379,7 +377,7 @@ function createServer() {
       } finally { lock.release(); }
     } catch (err) {
       const detail = err.responseStatus ? ` [${err.responseStatus}] ${err.responseText || ''}` : '';
-      console.error(`[imap_search_emails] ${err.message}${detail}`, err.stack);
+      console.error(`[imap_search_emails] ${err.message}${detail}`);
       return { content: [{ type: "text", text: `Chyba: ${err.message}${detail}` }], isError: true };
     } finally {
       await client.logout().catch(() => {});
@@ -398,8 +396,7 @@ function createServer() {
       try {
         let envelope, flags;
         const attachments = [];
-        const uidStr = String(uid);
-        for await (const msg of client.fetch(uidStr, { envelope: true, flags: true, bodyStructure: true, uid: true })) {
+        for await (const msg of client.fetch(String(uid), { envelope: true, flags: true, bodyStructure: true }, { uid: true })) {
           envelope = msg.envelope;
           flags = msg.flags;
           // Collect attachment info
@@ -416,13 +413,13 @@ function createServer() {
 
         let bodyText = "";
         try {
-          const { content } = await client.download(uidStr, "1", { uid: true });
+          const { content } = await client.download(String(uid), "1", { uid: true });
           const chunks = [];
           for await (const chunk of content) chunks.push(chunk);
           bodyText = Buffer.concat(chunks).toString("utf-8");
         } catch {
           try {
-            const { content } = await client.download(uidStr, "1.1", { uid: true });
+            const { content } = await client.download(String(uid), "1.1", { uid: true });
             const chunks = [];
             for await (const chunk of content) chunks.push(chunk);
             bodyText = Buffer.concat(chunks).toString("utf-8");
@@ -433,7 +430,7 @@ function createServer() {
       } finally { lock.release(); }
     } catch (err) {
       const detail = err.responseStatus ? ` [${err.responseStatus}] ${err.responseText || ''}` : '';
-      console.error(`[imap_get_email] ${err.message}${detail}`, err.stack);
+      console.error(`[imap_get_email] ${err.message}${detail}`);
       return { content: [{ type: "text", text: `Chyba: ${err.message}${detail}` }], isError: true };
     } finally {
       await client.logout().catch(() => {});
@@ -602,8 +599,7 @@ function createServer() {
       const lock = await client.getMailboxLock(folder);
       let envelope;
       try {
-        const uidStr = String(uid);
-        for await (const msg of client.fetch(uidStr, { envelope: true, uid: true })) { envelope = msg.envelope; }
+        for await (const msg of client.fetch(String(uid), { envelope: true }, { uid: true })) { envelope = msg.envelope; }
       } finally { lock.release(); }
 
       if (!envelope) throw new Error(`UID ${uid} nenájdený.`);
@@ -652,10 +648,9 @@ function createServer() {
       let envelope;
       let bodyText = "";
       try {
-        const uidStr = String(uid);
-        for await (const msg of client.fetch(uidStr, { envelope: true, uid: true })) { envelope = msg.envelope; }
+        for await (const msg of client.fetch(String(uid), { envelope: true }, { uid: true })) { envelope = msg.envelope; }
         try {
-          const { content } = await client.download(uidStr, "1", { uid: true });
+          const { content } = await client.download(String(uid), "1", { uid: true });
           const chunks = [];
           for await (const chunk of content) chunks.push(chunk);
           bodyText = Buffer.concat(chunks).toString("utf-8");
