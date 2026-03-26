@@ -758,18 +758,13 @@ if (TRANSPORT === "stdio") {
   console.error("IMAP MCP server — stdio režim.");
 } else {
   const app = express();
-  // Monkey-patch: Overridni req.get/req.header aby vždy vrátili správny Accept
-  app.use((req, res, next) => {
-    const origGet = req.get.bind(req);
-    req.get = (name) => {
-      if (name && name.toLowerCase() === 'accept') {
-        return 'application/json, text/event-stream';
-      }
-      return origGet(name);
-    };
-    req.header = req.get;
-    next();
-  });
+  // Patch StreamableHTTPServerTransport.handleRequest aby preskočil Accept validáciu
+  const OrigTransport = StreamableHTTPServerTransport;
+  const origProto = OrigTransport.prototype.handleRequest;
+  OrigTransport.prototype.handleRequest = function(req, res, body) {
+    req.headers["accept"] = "application/json, text/event-stream";
+    return origProto.call(this, req, res, body);
+  };
   app.use(express.json());
   const transports = {};
 
