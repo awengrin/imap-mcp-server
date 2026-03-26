@@ -758,11 +758,16 @@ if (TRANSPORT === "stdio") {
   console.error("IMAP MCP server — stdio režim.");
 } else {
   const app = express();
-  // Fix Accept header — SDK vyžaduje oba MIME typy
+  // Monkey-patch: Overridni req.get/req.header aby vždy vrátili správny Accept
   app.use((req, res, next) => {
-    if (req.method === "POST" || req.method === "DELETE" || req.method === "GET") {
-      req.headers["accept"] = "application/json, text/event-stream";
-    }
+    const origGet = req.get.bind(req);
+    req.get = (name) => {
+      if (name && name.toLowerCase() === 'accept') {
+        return 'application/json, text/event-stream';
+      }
+      return origGet(name);
+    };
+    req.header = req.get;
     next();
   });
   app.use(express.json());
