@@ -1,0 +1,27 @@
+{
+  "name": "imap-mcp-server",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "server.mjs",
+  "scripts": {
+    "start": "node server.mjs",
+    "start:http": "TRANSPORT=http node server.mjs",
+    "start:stdio": "TRANSPORT=stdio node server.mjs"
+  },
+  "author": "Digital Berry s.r.o.",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.28.0",
+    "express": "^5.2.1",
+    "imapflow": "^1.2.18",
+    "mailparser": "^3.9.6",
+    "nodemailer": "^8.0.4",
+    "zod": "^4.3.6"
+  },
+  "description": "Vlastný MCP server pre emailovú komunikáciu cez IMAP a SMTP. Multi-tenant podpora cez environment variables, automatické ukladanie odoslaných emailov do Sent folderu.",
+  "keywords": [],
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/nodemailer": "^7.0.11"
+  }
+}
