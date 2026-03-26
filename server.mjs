@@ -726,6 +726,31 @@ function createServer() {
     } finally { await client.logout().catch(() => {}); }
   });
 
+  // ── ATTACHMENT BASE64 (pre programové spracovanie) ──
+  server.tool("imap_get_attachment_base64", "Stiahne prílohu a vráti base64 obsah priamo v odpovedi. Používaj pre programové spracovanie príloh (uloženie na disk, konverzia). Pre veľké prílohy (>500KB) použi radšej imap_download_attachment s URL.", {
+    account: accountParam, folder: z.string().default("INBOX"),
+    uid: z.number(), part: z.string().describe("Part číslo prílohy"),
+  }, async ({ account, folder, uid, part }) => {
+    const client = await getImapClient(account);
+    try {
+      const lock = await client.getMailboxLock(folder);
+      try {
+        const { content, meta } = await client.download(String(uid), part, { uid: true });
+        const chunks = [];
+        for await (const chunk of content) chunks.push(chunk);
+        const buffer = Buffer.concat(chunks);
+        const filename = meta?.filename || `attachment_${uid}_${part}`;
+        const contentType = meta?.contentType || "application/octet-stream";
+        const sizeKB = (buffer.length / 1024).toFixed(1);
+        const b64 = buffer.toString("base64");
+
+        return { content: [{ type: "text", text: `ATTACHMENT_META:${JSON.stringify({ filename, contentType, sizeKB })}\nATTACHMENT_BASE64:${b64}` }] };
+      } finally { lock.release(); }
+    } catch (err) {
+      return { content: [{ type: "text", text: `Chyba: ${err.message}` }], isError: true };
+    } finally { await client.logout().catch(() => {}); }
+  });
+
   // ── SPAM CHECK ──
   server.tool("imap_check_spam", "Kontrola emailov proti blacklistu spamových domén.", {
     account: accountParam, folder: z.string().default("INBOX"),
