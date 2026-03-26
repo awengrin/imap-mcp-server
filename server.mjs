@@ -758,6 +758,16 @@ if (TRANSPORT === "stdio") {
   console.error("IMAP MCP server — stdio režim.");
 } else {
   const app = express();
+  // Fix Accept header — SDK vyžaduje oba MIME typy
+  app.use((req, res, next) => {
+    if (req.path === "/mcp" && req.method === "POST") {
+      req.headers["accept"] = "application/json, text/event-stream";
+    }
+    if (req.path === "/mcp" && req.method === "DELETE") {
+      req.headers["accept"] = "application/json";
+    }
+    next();
+  });
   app.use(express.json());
   const transports = {};
 
