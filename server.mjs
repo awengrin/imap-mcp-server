@@ -1,4 +1,3 @@
-fetch('https://api.ipify.org').then(r => r.text()).then(ip => console.log('PUBLIC IP:', ip));
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { SSEServerTransport } from "@modelcontextprotocol/sdk/server/sse.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
