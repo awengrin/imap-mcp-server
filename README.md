@@ -7,6 +7,7 @@ Vlastný MCP server pre emailovú komunikáciu cez IMAP a SMTP. Multi-tenant pod
 - Multi-tenant: 5–10+ emailových účtov cez environment variables
 - Automatický save-to-sent po každom odoslaní (auto-detekcia Sent folderu)
 - Čítanie, vyhľadávanie, odpovedanie, preposielanie emailov
+- Ukladanie konceptov do Drafts cez IMAP APPEND (`imap_save_draft`), bez akéhokoľvek odoslania
 - Hromadné mazanie (bulk delete)
 - Spam detekcia (doménový blacklist)
 - Presun emailov medzi priečinkami
@@ -25,7 +26,9 @@ IMAP_ACCOUNT_INFO_PASS=heslo
 IMAP_ACCOUNT_INFO_SMTP_HOST=smtp.example.com
 IMAP_ACCOUNT_INFO_SMTP_PORT=465
 IMAP_ACCOUNT_INFO_SMTP_SECURE=true
-IMAP_ACCOUNT_INFO_SENT_FOLDER=Sent  # voliteľné
+IMAP_ACCOUNT_INFO_SENT_FOLDER=Sent      # voliteľné
+IMAP_ACCOUNT_INFO_DRAFTS_FOLDER=Drafts  # voliteľné
+IMAP_ACCOUNT_INFO_FROM_NAME=Adrián Wengrín  # voliteľné, zobrazované meno v From
 ```
 
 ## Deployment na Railway
@@ -40,7 +43,7 @@ IMAP_ACCOUNT_INFO_SENT_FOLDER=Sent  # voliteľné
 Settings → Integrations → Add Integration
 URL: `https://tvoj-server.up.railway.app/mcp`
 
-## Tooly (17)
+## Tooly (19)
 
 - `list_accounts` — zoznam účtov
 - `imap_list_folders` — priečinky
@@ -55,9 +58,11 @@ URL: `https://tvoj-server.up.railway.app/mcp`
 - `imap_bulk_delete` — hromadné mazanie
 - `imap_move_email` — presun
 - `imap_send_email` — odoslať (+ save to sent)
+- `imap_save_draft` — **uložiť koncept do Drafts, nič neodosiela**
 - `imap_reply_to_email` — odpovedať (+ save to sent)
 - `imap_forward_email` — preposlať (+ save to sent)
 - `imap_download_attachment` — stiahnuť prílohu
+- `imap_get_attachment_base64` — príloha ako base64
 - `imap_check_spam` — spam detekcia
 
 ## Lokálny vývoj

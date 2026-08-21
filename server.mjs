@@ -12,7 +12,7 @@ import nodemailer from "nodemailer";
 // ─────────────────────────────────────────────
 // KONFIGURÁCIA ÚČTOV Z ENVIRONMENT VARIABLES
 // ─────────────────────────────────────────────
-// Formát: IMAP_ACCOUNT_<MENO>_HOST, _PORT, _USER, _PASS, _SMTP_HOST, _SMTP_PORT, _SMTP_SECURE, _SENT_FOLDER
+// Formát: IMAP_ACCOUNT_<MENO>_HOST, _PORT, _USER, _PASS, _SMTP_HOST, _SMTP_PORT, _SMTP_SECURE, _SENT_FOLDER, _DRAFTS_FOLDER, _FROM_NAME
 // Príklad:
 //   IMAP_ACCOUNT_INFO_HOST=imap.example.com
 //   IMAP_ACCOUNT_INFO_PORT=993
@@ -22,6 +22,8 @@ import nodemailer from "nodemailer";
 //   IMAP_ACCOUNT_INFO_SMTP_PORT=465
 //   IMAP_ACCOUNT_INFO_SMTP_SECURE=true
 //   IMAP_ACCOUNT_INFO_SENT_FOLDER=Sent   (voliteľné, auto-detekcia)
+//   IMAP_ACCOUNT_INFO_DRAFTS_FOLDER=Drafts (voliteľné, auto-detekcia)
+//   IMAP_ACCOUNT_INFO_FROM_NAME=Adrián Wengrín  (voliteľné, zobrazované meno v From)
 
 function loadAccounts() {
   const accounts = {};
@@ -63,6 +65,8 @@ function loadAccounts() {
         secure: (process.env[`${p}SMTP_SECURE`] || "true") === "true",
       },
       sentFolder: process.env[`${p}SENT_FOLDER`] || null,
+      draftsFolder: process.env[`${p}DRAFTS_FOLDER`] || null,
+      fromName: process.env[`${p}FROM_NAME`] || null,
     };
   }
 
@@ -141,6 +145,41 @@ async function saveToSent(accountName, rawMessage) {
     const sentFolder = await detectSentFolder(client, accountName);
     await client.append(sentFolder, rawMessage, ["\\Seen"]);
     return sentFolder;
+  } finally {
+    await client.logout().catch(() => {});
+  }
+}
+
+async function detectDraftsFolder(client, accountName) {
+  const acc = ACCOUNTS[accountName];
+  if (acc.draftsFolder) return acc.draftsFolder;
+
+  const folders = await client.list();
+
+  // Priorita 1: špeciálne označenie
+  for (const folder of folders) {
+    if (folder.specialUse === "\\Drafts") return folder.path;
+  }
+
+  // Priorita 2: názov
+  const candidates = ["Drafts", "INBOX.Drafts", "Draft", "Koncepty", "INBOX.Koncepty", "[Gmail]/Drafts"];
+  for (const c of candidates) {
+    for (const f of folders) {
+      if (f.path.toLowerCase() === c.toLowerCase()) return f.path;
+    }
+  }
+
+  return "Drafts";
+}
+
+// Uloží MIME správu do Drafts. Zámerne tu neexistuje žiadna SMTP cesta — na tom
+// stojí celý zmysel draft toolu, koncept odosiela až človek z mailového klienta.
+async function saveToDrafts(accountName, rawMessage) {
+  const client = await getImapClient(accountName);
+  try {
+    const draftsFolder = await detectDraftsFolder(client, accountName);
+    await client.append(draftsFolder, rawMessage, ["\\Draft"]);
+    return draftsFolder;
   } finally {
     await client.logout().catch(() => {});
   }
@@ -583,6 +622,99 @@ function createServer() {
       }
 
       return { content: [{ type: "text", text: `[${account}] Odoslané na ${to}. ID: ${info.messageId}.${sentInfo}` }] };
+    } catch (err) {
+      return { content: [{ type: "text", text: `Chyba: ${err.message}` }], isError: true };
+    }
+  });
+
+  // ── SAVE DRAFT ──
+  // Uloží koncept do Drafts cez IMAP APPEND. Zámerne sa tu nikde nevolá SMTP:
+  // tool je pre workflow, kde návrh odpovede pripraví agent a odošle ho človek.
+  server.tool("imap_save_draft", "Uloží email ako koncept do priečinka Drafts. NEODOSIELA nič, koncept si používateľ skontroluje a odošle sám z mailového klienta. Ak zadáš inReplyToUid, koncept sa naviaže na pôvodný email ako odpoveď (predmet Re:, príjemcovia z originálu, hlavičky vlákna).", {
+    account: accountParam,
+    to: z.string().optional().describe("Príjemca (viac oddeľ čiarkou). Voliteľné, ak je zadané inReplyToUid."),
+    subject: z.string().optional().describe("Predmet. Voliteľné, ak je zadané inReplyToUid."),
+    text: z.string().optional().describe("Text obsah"),
+    html: z.string().optional().describe("HTML obsah"),
+    cc: z.string().optional(),
+    bcc: z.string().optional(),
+    replyTo: z.string().optional(),
+    fromName: z.string().optional().describe("Zobrazované meno odosielateľa. Default je _FROM_NAME účtu."),
+    inReplyToUid: z.number().optional().describe("UID emailu, na ktorý koncept odpovedá. Doplní príjemcov, Re: predmet a hlavičky vlákna."),
+    inReplyToFolder: z.string().default("INBOX").describe("Priečinok, v ktorom je pôvodný email"),
+    replyAll: z.boolean().default(false).describe("Pri inReplyToUid pridá aj ostatných príjemcov originálu"),
+    attachments: z.array(z.object({
+      filename: z.string(),
+      content: z.string().describe("Base64 obsah"),
+      contentType: z.string().optional(),
+    })).optional(),
+  }, async ({ account, to, subject, text, html, cc, bcc, replyTo, fromName, inReplyToUid, inReplyToFolder, replyAll, attachments }) => {
+    try {
+      const acc = ACCOUNTS[account];
+      if (!acc) throw new Error(`Účet "${account}" neexistuje.`);
+      if (!text && !html) throw new Error("Koncept musí mať text alebo html obsah.");
+
+      let derivedTo = null, derivedSubject = null, derivedCc = null;
+      let inReplyTo, references;
+
+      if (inReplyToUid !== undefined) {
+        const client = await getImapClient(account);
+        try {
+          const lock = await client.getMailboxLock(inReplyToFolder);
+          let envelope;
+          try {
+            for await (const msg of client.fetch(String(inReplyToUid), { envelope: true }, { uid: true })) {
+              envelope = msg.envelope;
+            }
+          } finally { lock.release(); }
+
+          if (!envelope) throw new Error(`UID ${inReplyToUid} nenájdený v ${inReplyToFolder}.`);
+
+          let recipients = envelope.from?.map((f) => f.address).filter(Boolean) || [];
+          if (replyAll && envelope.to) {
+            recipients = [...recipients, ...envelope.to.map((t) => t.address).filter((a) => a && a !== acc.imap.user)];
+          }
+          derivedTo = recipients.join(", ");
+          derivedSubject = envelope.subject?.startsWith("Re:") ? envelope.subject : `Re: ${envelope.subject || ""}`;
+          if (replyAll && envelope.cc) {
+            derivedCc = envelope.cc.map((c) => c.address).filter((a) => a && a !== acc.imap.user).join(", ");
+          }
+          inReplyTo = envelope.messageId;
+          references = envelope.messageId;
+        } finally {
+          await client.logout().catch(() => {});
+        }
+      }
+
+      const finalTo = to || derivedTo;
+      const finalSubject = subject || derivedSubject;
+      if (!finalTo) throw new Error("Chýba príjemca: zadaj `to` alebo `inReplyToUid`.");
+      if (!finalSubject) throw new Error("Chýba predmet: zadaj `subject` alebo `inReplyToUid`.");
+
+      const displayName = fromName || acc.fromName;
+      const raw = await buildRawMessage({
+        from: displayName ? { name: displayName, address: acc.imap.user } : acc.imap.user,
+        to: finalTo,
+        subject: finalSubject,
+        text: text || undefined,
+        html: html || undefined,
+        cc: cc || derivedCc || undefined,
+        bcc: bcc || undefined,
+        replyTo: replyTo || undefined,
+        inReplyTo,
+        references,
+        attachments: attachments?.length
+          ? attachments.map((a) => ({
+              filename: a.filename,
+              content: Buffer.from(a.content, "base64"),
+              contentType: a.contentType || undefined,
+            }))
+          : undefined,
+      });
+
+      const draftsFolder = await saveToDrafts(account, raw);
+
+      return { content: [{ type: "text", text: `[${account}] Koncept uložený do ${draftsFolder} pre ${finalTo}. Predmet: "${finalSubject}". NEODOSLANÉ.` }] };
     } catch (err) {
       return { content: [{ type: "text", text: `Chyba: ${err.message}` }], isError: true };
     }
