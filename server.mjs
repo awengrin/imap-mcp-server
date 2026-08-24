@@ -725,7 +725,8 @@ function createServer() {
     account: accountParam, folder: z.string().default("INBOX"),
     uid: z.number(), text: z.string().optional(), html: z.string().optional(),
     replyAll: z.boolean().default(false),
-  }, async ({ account, folder, uid, text, html, replyAll }) => {
+    fromName: z.string().optional().describe("Zobrazované meno odosielateľa. Default je _FROM_NAME účtu."),
+  }, async ({ account, folder, uid, text, html, replyAll, fromName }) => {
     const client = await getImapClient(account);
     try {
       const lock = await client.getMailboxLock(folder);
@@ -745,8 +746,10 @@ function createServer() {
       }
 
       const reSubject = envelope.subject?.startsWith("Re:") ? envelope.subject : `Re: ${envelope.subject || ""}`;
+      const displayName = fromName || acc.fromName;
       const mailOptions = {
-        from: acc.imap.user, to: recipients.join(", "), subject: reSubject,
+        from: displayName ? { name: displayName, address: acc.imap.user } : acc.imap.user,
+        to: recipients.join(", "), subject: reSubject,
         text: text || undefined, html: html || undefined,
         inReplyTo: envelope.messageId, references: envelope.messageId,
       };
